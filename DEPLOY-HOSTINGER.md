@@ -63,15 +63,36 @@ node -v && npm -v
 
 ## 3. Get the code onto the server
 
-Push your project to a private GitHub repo, then:
+The repo is **private**, so the server needs its own read access. Give it a deploy
+key — a key scoped to this one repository, which is safer than putting a personal
+token on a server.
+
+On the server:
 
 ```bash
-su - mailflow -c "git clone https://github.com/YOU/mailflow.git ~/mailflow"
+ssh-keygen -t ed25519 -f ~/.ssh/github_deploy -N "" -C "mailflow-vps" && cat ~/.ssh/github_deploy.pub
 ```
 
-Or upload the folder with SFTP to `/home/mailflow/mailflow`. Either way, **do not
-upload `.env`, `.tokens.json`, `.forwarding.json`, or `node_modules`** — the first
-three are secrets and the last is platform-specific.
+Copy that output into GitHub → the repo → **Settings → Deploy keys → Add deploy key**.
+Leave "Allow write access" **unchecked**; the server only ever needs to read.
+
+Then tell SSH to use it, and clone:
+
+```bash
+printf 'Host github.com\n  IdentityFile ~/.ssh/github_deploy\n  IdentitiesOnly yes\n' >> ~/.ssh/config
+```
+
+```bash
+git clone git@github.com:keerumohitchadda/gmail.automation-.git ~/mailflow
+```
+
+**Simpler alternative:** skip git entirely and upload the bundle, which is what
+`deploy.sh` expects. It copies from whatever folder it is sitting in, so no repository
+access is needed on the server at all. You lose one-command updates, but the initial
+deploy is quicker.
+
+Either way, **never upload `.env`, `.tokens.json`, `.forwarding.json`, or
+`node_modules`** — the first three are secrets and the last is platform-specific.
 
 ## 4. Install dependencies and configure
 
