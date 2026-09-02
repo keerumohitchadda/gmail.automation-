@@ -134,12 +134,25 @@ export async function deliver(msg) {
  * Runs strictly one at a time: WhatsApp orders by arrival, and a parallel burst both
  * scrambles that order and makes the per-number rate limit much easier to trip.
  */
-export async function processMessageIds(ids) {
+export async function processMessageIds(ids, { budgetMs = 0 } = {}) {
   const results = [];
+  const startedAt = Date.now();
 
   for (const id of ids) {
-    if (store.hasSent(id)) {
-      results.push({ id, status: 'skipped', reason: 'already forwarded' });
+    // Serverless runs these concurrently, so the claim has to happen before any work:
+    // it is the single atomic point that decides which invocation owns this message.
+    // Claiming up front means a failure cannot be retried by simply re-running, which
+    // is why failures below go onto the retry queue instead.
+    if (!(await store.claim(id))) {
+      results.push({ id, status: 'skipped', reason: 'already handled' });
+      continue;
+    }
+
+    // Stop early rather than be killed mid-send by the platform's time limit. Whatever
+    // is left is unclaimed, so the next notification or cron run picks it up.
+    if (budgetMs && Date.now() - startedAt > budgetMs) {
+      results.push({ id, status: 'deferred', reason: 'time budget reached' });
+      await store.enqueue({ id, queuedAt: Date.now(), reason: 'deferred' });
       continue;
     }
 
@@ -153,29 +166,26 @@ export async function processMessageIds(ids) {
 
     const verdict = shouldForward(msg);
     if (!verdict.ok) {
-      // Remember filtered mail too, so a replayed history event does not re-evaluate it.
-      store.markSent(id);
       results.push({ id, status: 'filtered', reason: verdict.reason, subject: msg.subject });
       continue;
     }
 
     if (inQuietHours()) {
-      store.markSent(id);
-      store.enqueue({ id, queuedAt: Date.now(), subject: msg.subject, from: msg.fromEmail });
+      await store.enqueue({ id, queuedAt: Date.now(), subject: msg.subject, from: msg.fromEmail });
       results.push({ id, status: 'queued', reason: 'quiet hours', subject: msg.subject });
       continue;
     }
 
     try {
       const { via } = await deliver(msg);
-      store.markSent(id);
       results.push({ id, status: 'sent', via, subject: msg.subject });
       console.log(`[forward] sent (${via}): ${msg.subject}`);
     } catch (err) {
-      // Deliberately not marked as sent — a transient Meta failure should be retried
-      // by the next notification rather than silently swallowing the mail.
-      results.push({ id, status: 'error', reason: err.message, subject: msg.subject });
-      console.error(`[forward] failed: ${msg.subject} — ${err.message}`);
+      // The claim is already spent, so a plain retry would skip this message forever.
+      // Queue it explicitly instead: the next cron run drains it.
+      await store.enqueue({ id, queuedAt: Date.now(), subject: msg.subject, reason: 'retry' });
+      results.push({ id, status: 'requeued', reason: err.message, subject: msg.subject });
+      console.error(`[forward] failed, queued for retry: ${msg.subject} — ${err.message}`);
       if (wa.isAuthError(err)) break;
     }
   }
@@ -183,23 +193,43 @@ export async function processMessageIds(ids) {
   return results;
 }
 
-/** Sends anything quiet hours held back. Called when the window closes. */
-export async function flushQueue() {
+/**
+ * Drains everything waiting: mail quiet hours held back, deliveries that failed, and
+ * anything deferred when an invocation ran out of time.
+ *
+ * Called by the cron endpoint, and after each webhook once the quiet window has closed.
+ */
+export async function flushQueue({ budgetMs = 0 } = {}) {
   if (inQuietHours()) return [];
 
-  const queued = store.drainQueue();
+  const queued = await store.drainQueue();
   if (!queued.length) return [];
 
-  console.log(`[forward] quiet hours over — flushing ${queued.length} held message(s)`);
-
+  console.log(`[forward] draining ${queued.length} held message(s)`);
+  const startedAt = Date.now();
   const results = [];
+
   for (const entry of queued) {
+    if (budgetMs && Date.now() - startedAt > budgetMs) {
+      // Put the rest back so the next run continues where this one stopped.
+      await store.enqueue(entry);
+      results.push({ id: entry.id, status: 'deferred' });
+      continue;
+    }
     try {
       const msg = await gmail.getMessage(entry.id);
       const { via } = await deliver(msg);
       results.push({ id: entry.id, status: 'sent', via, subject: msg.subject });
     } catch (err) {
-      results.push({ id: entry.id, status: 'error', reason: err.message });
+      // Only re-queue a first failure. Something permanently undeliverable — a message
+      // that no longer exists, say — would otherwise cycle forever.
+      if (!entry.retried) {
+        await store.enqueue({ ...entry, retried: true });
+        results.push({ id: entry.id, status: 'requeued', reason: err.message });
+      } else {
+        results.push({ id: entry.id, status: 'dropped', reason: err.message });
+        console.error(`[forward] giving up on ${entry.id}: ${err.message}`);
+      }
     }
   }
   return results;
@@ -207,11 +237,16 @@ export async function flushQueue() {
 
 let sweeper = null;
 
-/** Checks every five minutes whether the quiet window has closed. */
+/**
+ * Five-minute quiet-hours sweep, for when the app runs as a long-lived process.
+ *
+ * A no-op on serverless, where nothing survives between requests — there the cron
+ * endpoint does this job instead.
+ */
 export function startQuietHoursSweeper() {
-  if (sweeper) return;
+  if (sweeper || process.env.VERCEL) return;
   sweeper = setInterval(() => {
-    if (!store.get().enabled) return;
+    if (!store.isLoaded() || !store.get().enabled) return;
     flushQueue().catch((err) => console.error('[forward] flush failed:', err.message));
   }, 5 * 60 * 1000);
   sweeper.unref?.();

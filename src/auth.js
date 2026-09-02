@@ -1,8 +1,7 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { google } from 'googleapis';
+import * as kv from './kv.js';
 
-const TOKEN_PATH = path.resolve('.tokens.json');
+const TOKEN_KEY = 'mailflow:tokens';
 
 /**
  * Read, modify, label and send. This is a Google "restricted" scope, so the app must
@@ -11,6 +10,7 @@ const TOKEN_PATH = path.resolve('.tokens.json');
 export const SCOPES = ['https://www.googleapis.com/auth/gmail.modify'];
 
 let oauthClient = null;
+let cachedTokens = null;
 
 export function getClient() {
   if (oauthClient) return oauthClient;
@@ -29,19 +29,16 @@ export function getClient() {
   );
 
   // googleapis refreshes the access token on its own; persist whatever it hands back
-  // so a restart doesn't send you through the consent screen again.
+  // so the next invocation does not have to send you through the consent screen.
   oauthClient.on('tokens', (tokens) => {
-    saveTokens({ ...readCachedTokens(), ...tokens }).catch((err) =>
+    // A refresh only returns the access token, so merge rather than replace —
+    // overwriting would drop the refresh token and end the session permanently.
+    saveTokens({ ...(cachedTokens || {}), ...tokens }).catch((err) =>
       console.error('Could not persist refreshed tokens:', err.message),
     );
   });
 
   return oauthClient;
-}
-
-let cachedTokens = null;
-function readCachedTokens() {
-  return cachedTokens || {};
 }
 
 export function authUrl() {
@@ -63,15 +60,20 @@ export async function exchangeCode(code) {
 
 async function saveTokens(tokens) {
   cachedTokens = tokens;
-  await fs.writeFile(TOKEN_PATH, JSON.stringify(tokens, null, 2), { mode: 0o600 });
+  await kv.setJSON(TOKEN_KEY, tokens);
 }
 
-/** Restores a previous session at startup. Returns true if we have usable credentials. */
+/**
+ * Restores the Google session from the store.
+ *
+ * On a long-lived server this runs once at boot. On serverless there is no boot, so it
+ * runs per request — cheap, because the credentials are one small object and the
+ * client is reused within an invocation.
+ */
 export async function restoreSession() {
   try {
-    const raw = await fs.readFile(TOKEN_PATH, 'utf8');
-    const tokens = JSON.parse(raw);
-    if (!tokens.refresh_token && !tokens.access_token) return false;
+    const tokens = await kv.getJSON(TOKEN_KEY);
+    if (!tokens || (!tokens.refresh_token && !tokens.access_token)) return false;
     cachedTokens = tokens;
     getClient().setCredentials(tokens);
     return true;
@@ -83,7 +85,7 @@ export async function restoreSession() {
 export async function logout() {
   cachedTokens = null;
   if (oauthClient) oauthClient.setCredentials({});
-  await fs.rm(TOKEN_PATH, { force: true });
+  await kv.del(TOKEN_KEY);
 }
 
 export function isAuthorized() {

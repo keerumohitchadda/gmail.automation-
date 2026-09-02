@@ -9,3 +9,5 @@ logs/
 
 # Static design mock with sample data — duplicates styles.css and would drift.
 design-preview.html
+.kv.json
+.vercel/

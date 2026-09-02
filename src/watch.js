@@ -57,13 +57,19 @@ export async function stopWatch() {
 
 let renewalTimer = null;
 
-/** Re-registers the watch once a day, well inside Gmail's seven-day expiry. */
+/**
+ * Re-registers the watch once a day, well inside Gmail's seven-day expiry.
+ *
+ * A no-op on serverless: there is no process to hold a timer, and a setInterval
+ * registered during a request dies with that invocation. The /cron/renew endpoint
+ * covers it there, driven by the schedule in vercel.json.
+ */
 export function scheduleRenewal() {
-  if (renewalTimer) return;
+  if (renewalTimer || process.env.VERCEL) return;
 
   const DAY = 24 * 60 * 60 * 1000;
   renewalTimer = setInterval(async () => {
-    if (!isAuthorized() || !store.get().enabled) return;
+    if (!isAuthorized() || !store.isLoaded() || !store.get().enabled) return;
     try {
       await startWatch();
     } catch (err) {

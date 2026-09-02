@@ -1,117 +1,131 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-
-const STORE_PATH = path.resolve('.forwarding.json');
+import * as kv from './kv.js';
 
 /**
- * Everything the forwarder needs to survive a restart: user settings, the Gmail
- * history cursor, the watch expiry, and a short memory of what we already sent.
+ * Settings, the Gmail history cursor, and the two collections that keep forwarding
+ * honest: what has already been sent, and what quiet hours is holding.
  *
- * It is a single small JSON file written whole. Volume here is a handful of writes
- * per minute at worst, so the simplicity is worth more than incremental updates.
+ * The shape here is driven by serverless. A single invocation loads a snapshot once,
+ * reads it synchronously all through the request, and writes changes through to the
+ * store — which is why `get()` stayed synchronous and almost nothing else in the app
+ * had to become async when this moved off the filesystem.
+ *
+ * The two collections are deliberately *not* in that snapshot. Concurrent invocations
+ * are normal on Vercel, and a read-modify-write of an array would let two of them both
+ * decide a message is unsent. They live in the store as a set and a list, mutated with
+ * operations that are atomic on the server.
  */
+
+const KEY_SETTINGS = 'mailflow:settings';
+const KEY_SENT = 'mailflow:sent';
+const KEY_QUEUE = 'mailflow:queue';
+
+const SENT_ID_LIMIT = 500;
+
 const DEFAULTS = {
   enabled: false,
 
-  // Destination in full international form, digits only. "919876543210", not "+91 98765 43210".
+  // Destination in full international form, digits only. "919876543210".
   toNumber: '',
 
-  // Which categorize.js buckets get forwarded. Empty array means "none".
   categories: ['Personal', 'Work', 'Finance', 'Shopping'],
 
-  // Substring matches against the sender address. Allowlist, when non-empty, wins
-  // outright: nothing outside it is ever forwarded, whatever the categories say.
+  // A non-empty allowlist replaces the category filter rather than narrowing it.
   senderAllowlist: [],
   senderBlocklist: [],
 
-  // Comma-separated words; if set, the subject or snippet must contain one of them.
   keywords: '',
 
-  // How much of the mail body to put in the message. 0 keeps it to sender + subject.
+  // How much mail body to include. 0 keeps it to sender + subject.
   bodyChars: 600,
 
-  // Nothing is sent between these times, local to the server. Held, not dropped —
-  // queued mail goes out when the window closes.
   quietHours: { enabled: false, start: '23:00', end: '07:00' },
 
-  // --- runtime state, not user-editable ---
+  // --- runtime state ---
   lastHistoryId: null,
   watchExpiration: null,
-  watchedEmail: null,
 
-  // Unix ms of the last inbound WhatsApp message from `toNumber`. Meta only allows
-  // free-form replies for 24h after this; outside it we must fall back to a template.
+  // Unix ms of the last inbound WhatsApp message. Meta only allows free-form replies
+  // for 24h after this; outside it we must fall back to an approved template.
   lastInboundAt: null,
-
-  // Ids we have already forwarded, newest last. Gmail's history feed can replay the
-  // same message across notifications, so this is what stops duplicate pings.
-  sentIds: [],
-
-  // Mail held back by quiet hours, flushed when the window closes.
-  queued: [],
 };
 
-const SENT_ID_LIMIT = 500;
-const QUEUE_LIMIT = 100;
+let snapshot = null;
+let counts = { sent: 0, queued: 0 };
+let pending = Promise.resolve();
 
-let state = null;
-let writeChain = Promise.resolve();
-
+/**
+ * Pulls the current state in. Call once per request on serverless; once at boot when
+ * running as a long-lived process.
+ */
 export async function load() {
-  try {
-    const raw = await fs.readFile(STORE_PATH, 'utf8');
-    const saved = JSON.parse(raw);
-    state = { ...structuredClone(DEFAULTS), ...saved, quietHours: { ...DEFAULTS.quietHours, ...(saved.quietHours || {}) } };
-  } catch {
-    state = structuredClone(DEFAULTS);
-  }
-  return state;
+  const saved = (await kv.getJSON(KEY_SETTINGS)) || {};
+  snapshot = {
+    ...structuredClone(DEFAULTS),
+    ...saved,
+    quietHours: { ...DEFAULTS.quietHours, ...(saved.quietHours || {}) },
+  };
+  counts.queued = await kv.listLength(KEY_QUEUE).catch(() => 0);
+  return snapshot;
 }
 
 export function get() {
-  if (!state) throw new Error('store.load() must run before store.get()');
-  return state;
+  if (!snapshot) throw new Error('store.load() must run before store.get()');
+  return snapshot;
 }
 
-/** Merges a patch into the store and persists it. Writes are serialised. */
+/** Whether load() has run in this invocation. */
+export function isLoaded() {
+  return snapshot !== null;
+}
+
+/** Merges a patch into the snapshot and writes it through. Writes are serialised. */
 export function update(patch) {
   const next = { ...get(), ...patch };
   if (patch.quietHours) next.quietHours = { ...get().quietHours, ...patch.quietHours };
-  state = next;
-  writeChain = writeChain.then(() =>
-    fs.writeFile(STORE_PATH, JSON.stringify(state, null, 2), { mode: 0o600 }).catch((err) =>
-      console.error('[store] could not persist:', err.message),
-    ),
-  );
-  return state;
+  snapshot = next;
+
+  pending = pending
+    .then(() => kv.setJSON(KEY_SETTINGS, snapshot))
+    .catch((err) => console.error('[store] could not persist:', err.message));
+
+  return snapshot;
 }
 
-export function flushed() {
-  return writeChain;
+/** Awaits any in-flight write. Call before a serverless response returns. */
+export async function flushed() {
+  await pending;
+  await kv.flushed();
 }
 
-export function hasSent(id) {
-  return get().sentIds.includes(id);
+/**
+ * Claims a message id, returning true only for the caller that got there first.
+ *
+ * Replaces the old check-then-mark pair on purpose: those were two steps, and two
+ * invocations could pass the check before either marked it. This is one atomic step,
+ * so exactly one caller is ever told to go ahead.
+ */
+export async function claim(id) {
+  const isNew = await kv.addIfNew(KEY_SENT, id);
+  if (isNew) {
+    counts.sent += 1;
+    // Trimming every so often keeps the set bounded without a check on each claim.
+    if (counts.sent % 100 === 0) await kv.trimSet(KEY_SENT, SENT_ID_LIMIT).catch(() => {});
+  }
+  return isNew;
 }
 
-export function markSent(id) {
-  const ids = get().sentIds.filter((existing) => existing !== id);
-  ids.push(id);
-  update({ sentIds: ids.slice(-SENT_ID_LIMIT) });
+export async function enqueue(entry) {
+  await kv.push(KEY_QUEUE, entry);
+  counts.queued += 1;
 }
 
-export function enqueue(entry) {
-  const queued = [...get().queued, entry].slice(-QUEUE_LIMIT);
-  update({ queued });
-}
-
-export function drainQueue() {
-  const { queued } = get();
-  if (queued.length) update({ queued: [] });
+export async function drainQueue() {
+  const queued = await kv.drain(KEY_QUEUE);
+  counts.queued = 0;
   return queued;
 }
 
-/** The user-facing slice of the store — runtime cursors stay server-side. */
+/** The user-facing slice. Runtime cursors stay server-side. */
 export function publicSettings() {
   const s = get();
   return {
@@ -125,9 +139,9 @@ export function publicSettings() {
     quietHours: s.quietHours,
     watching: Boolean(s.watchExpiration && s.watchExpiration > Date.now()),
     watchExpiration: s.watchExpiration,
-    queuedCount: s.queued.length,
-    forwardedCount: s.sentIds.length,
+    queuedCount: counts.queued,
     windowOpen: isWindowOpen(),
+    storage: kv.describe(),
   };
 }
 

@@ -57,9 +57,17 @@ You can text the bot `stop`, `start` or `status`.
 ## Deploying
 
 Forwarding only works while the app is reachable at a public HTTPS address, so a host
-is required rather than optional. See **[DEPLOY-HOSTINGER.md](DEPLOY-HOSTINGER.md)** —
-it covers Hostinger VPS (with PM2, Nginx and Let's Encrypt) and the managed Node.js
-option on Business/Cloud plans, including which plans cannot run Node at all.
+is required rather than optional.
+
+- **[VERCEL-SETUP.md](VERCEL-SETUP.md)** — free, no card, no server to administer.
+  Requires the Upstash Redis integration, because serverless has no persistent disk.
+- **[DEPLOY-HOSTINGER.md](DEPLOY-HOSTINGER.md)** — a VPS with PM2, Nginx and
+  Let's Encrypt. More setup, fewer constraints.
+- **[ORACLE-SETUP.md](ORACLE-SETUP.md)** — the same VPS path on Oracle's free tier.
+
+The app runs unchanged in both shapes. `src/kv.js` keeps state in Redis when
+`KV_REST_API_URL` is set and in a local file otherwise, and the background timers that
+only a long-lived process can run are skipped on Vercel in favour of the cron endpoint.
 
 Two endpoints exist for hosted operation: `/healthz` for uptime monitoring, and
 `/cron/renew?token=…` for a daily scheduler to keep the Gmail watch alive on hosting
