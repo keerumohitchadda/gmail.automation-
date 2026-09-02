@@ -1,0 +1,12 @@
+# Normalise to LF in the repository; check out native on Windows.
+* text=auto
+
+# Shell scripts must stay LF even on a Windows checkout. A CRLF here makes Linux
+# fail with "bad interpreter: /usr/bin/env bash^M", which is a baffling first error
+# to hit on a fresh server.
+*.sh text eol=lf
+
+# Binary — never touch.
+*.png binary
+*.jpg binary
+*.gz  binary

@@ -1,0 +1,11 @@
+node_modules/
+.env
+.tokens.json
+npm-debug.log*
+.DS_Store
+
+.forwarding.json
+logs/
+
+# Static design mock with sample data — duplicates styles.css and would drift.
+design-preview.html

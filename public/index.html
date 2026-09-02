@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MailFlow</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📬</text></svg>" />
+  <!-- Inter, with a system stack behind it in styles.css so the app still looks
+       right if this request fails (offline, blocked, first paint). -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">📬</span>
+      <div>
+        <h1>MailFlow</h1>
+        <p id="account" class="muted">Not connected</p>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <input id="search" type="search" placeholder="Search mail…" autocomplete="off" />
+      <button id="refresh" class="btn" title="Refresh now">↻ Refresh</button>
+      <button id="notify-toggle" class="btn" title="Desktop alerts for new mail">🔔 Alerts: off</button>
+      <button id="wa-open" class="btn" title="Forward new mail to WhatsApp">💬 WhatsApp</button>
+      <button id="compose" class="btn btn-primary">✏️ Compose</button>
+      <button id="logout" class="btn btn-quiet hidden">Disconnect</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <!-- Shown until the user connects a Google account. -->
+  <section id="connect-view" class="connect">
+    <h2>Connect your Gmail</h2>
+    <p>MailFlow pulls your inbox in, sorts it into categories, forwards what matters to
+       your WhatsApp, and lets you reply — with a confirmation step before anything sends.</p>
+    <a class="btn btn-primary btn-lg" href="/auth/google">Connect Gmail account</a>
+    <p class="muted small">First time? Follow <code>SETUP.md</code> to create your Google OAuth client.</p>
+  </section>
+
+  <main id="app-view" class="layout hidden">
+    <nav id="categories" class="sidebar"></nav>
+
+    <section class="list-pane">
+      <div id="list-status" class="list-status muted">Loading…</div>
+      <ul id="message-list" class="message-list"></ul>
+    </section>
+
+    <section id="reader" class="reader">
+      <div class="reader-empty muted">Select a message to read it.</div>
+    </section>
+  </main>
+
+  <!-- Compose / reply dialog -->
+  <dialog id="composer">
+    <form method="dialog" class="composer-form">
+      <h3 id="composer-title">New message</h3>
+
+      <label class="field" id="field-to">
+        <span>To</span>
+        <input id="composer-to" type="email" placeholder="someone@example.com" />
+      </label>
+
+      <label class="field" id="field-subject">
+        <span>Subject</span>
+        <input id="composer-subject" type="text" placeholder="Subject" />
+      </label>
+
+      <div class="quick-replies" id="quick-replies"></div>
+
+      <label class="field">
+        <span>Message</span>
+        <textarea id="composer-body" rows="10" placeholder="Type your message…"></textarea>
+      </label>
+
+      <div class="composer-actions">
+        <button type="button" class="btn btn-quiet" id="composer-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="composer-send">Send…</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Nothing is sent until this is confirmed. -->
+  <dialog id="confirm">
+    <div class="confirm-body">
+      <h3>Send this message?</h3>
+      <dl id="confirm-summary"></dl>
+      <pre id="confirm-preview"></pre>
+      <div class="composer-actions">
+        <button type="button" class="btn btn-quiet" id="confirm-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="confirm-send">Yes, send it</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- WhatsApp forwarding settings -->
+  <dialog id="wa-dialog">
+    <div class="wa-panel">
+      <h3>💬 Forward mail to WhatsApp</h3>
+      <p class="muted small" id="wa-setup-note"></p>
+
+      <div class="wa-row wa-master">
+        <label class="switch">
+          <input id="wa-enabled" type="checkbox" />
+          <span>Forwarding is <b id="wa-enabled-label">off</b></span>
+        </label>
+        <span id="wa-watch-state" class="pill muted">watch inactive</span>
+      </div>
+
+      <label class="field">
+        <span>Your WhatsApp number <em class="muted">(country code, digits only)</em></span>
+        <input id="wa-number" type="tel" inputmode="numeric" placeholder="919876543210" />
+      </label>
+
+      <fieldset class="field">
+        <legend>Forward these categories</legend>
+        <div id="wa-categories" class="wa-chips"></div>
+      </fieldset>
+
+      <label class="field">
+        <span>Only these senders <em class="muted">(comma separated — overrides categories)</em></span>
+        <input id="wa-allow" type="text" placeholder="boss@work.com, hdfcbank" />
+      </label>
+
+      <label class="field">
+        <span>Never these senders</span>
+        <input id="wa-block" type="text" placeholder="noreply, newsletter" />
+      </label>
+
+      <label class="field">
+        <span>Must contain keywords <em class="muted">(optional)</em></span>
+        <input id="wa-keywords" type="text" placeholder="invoice, urgent, otp" />
+      </label>
+
+      <label class="field">
+        <span>Body preview: <b id="wa-body-label">600</b> characters</span>
+        <input id="wa-body" type="range" min="0" max="2000" step="100" />
+      </label>
+
+      <div class="wa-row">
+        <label class="switch">
+          <input id="wa-quiet" type="checkbox" />
+          <span>Quiet hours</span>
+        </label>
+        <input id="wa-quiet-start" type="time" />
+        <span class="muted">to</span>
+        <input id="wa-quiet-end" type="time" />
+      </div>
+      <p class="muted small">Mail arriving in quiet hours is held, not dropped — it goes out when the window closes.</p>
+
+      <div id="wa-status" class="wa-status muted small"></div>
+
+      <div class="composer-actions">
+        <button type="button" class="btn btn-quiet" id="wa-close">Close</button>
+        <button type="button" class="btn" id="wa-sync">Sync unread now</button>
+        <button type="button" class="btn" id="wa-test">Send test</button>
+        <button type="button" class="btn btn-primary" id="wa-save">Save</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="app.js" type="module"></script>
+  <script src="whatsapp.js" type="module"></script>
+</body>
+</html>
