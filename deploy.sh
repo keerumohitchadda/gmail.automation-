@@ -175,15 +175,33 @@ ok "proxying ${DOMAIN} -> 127.0.0.1:3000"
 # ---------------------------------------------------------------------------
 step "Firewall"
 # ---------------------------------------------------------------------------
-if command -v ufw >/dev/null 2>&1; then
+# Port 3000 is never opened anywhere below: the app binds to loopback and is only
+# reachable through nginx.
+
+# Oracle Cloud's Ubuntu images ship an iptables chain that REJECTs everything except
+# SSH, *underneath* whatever ufw thinks it is doing. Opening the cloud Security List
+# is not enough and neither is ufw — the packets die on the host. This is the single
+# most common reason an Oracle instance looks dead on port 80.
+if iptables -C INPUT -j REJECT --reject-with icmp-host-prohibited >/dev/null 2>&1 \
+   || iptables -L INPUT -n 2>/dev/null | grep -q 'REJECT.*icmp-host-prohibited'; then
+  step_note="oracle-style iptables detected"
+  for port in 80 443; do
+    if ! iptables -C INPUT -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1; then
+      # Insert at the top so it lands before the catch-all REJECT.
+      iptables -I INPUT 1 -p tcp --dport "$port" -m conntrack --ctstate NEW -j ACCEPT
+    fi
+  done
+  apt-get install -y -qq iptables-persistent netfilter-persistent >/dev/null 2>&1 || true
+  netfilter-persistent save >/dev/null 2>&1 || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  ok "${step_note}; opened 80 and 443 and persisted the rules"
+  warn "Also open 80 and 443 in the Oracle console: Networking > VCN > Security Lists > Ingress"
+elif command -v ufw >/dev/null 2>&1; then
   ufw allow OpenSSH >/dev/null 2>&1 || true
   ufw allow 'Nginx Full' >/dev/null 2>&1 || true
   ufw --force enable >/dev/null 2>&1 || true
-  # Port 3000 is intentionally never opened: the app binds to loopback and is only
-  # reachable through nginx.
-  ok "ports 22, 80, 443 open; 3000 stays private"
+  ok "ufw: ports 22, 80, 443 open; 3000 stays private"
 else
-  warn "ufw not installed — skipping firewall"
+  warn "no recognised firewall — skipping"
 fi
 
 # ---------------------------------------------------------------------------
