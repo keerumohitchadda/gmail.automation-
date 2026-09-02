@@ -2,11 +2,15 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
 
   "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/api"
-    }
+    { "source": "/", "destination": "/index.html" },
+    { "source": "/(.*)", "destination": "/api" }
   ],
+
+  "functions": {
+    "api/index.js": {
+      "includeFiles": "public/**"
+    }
+  },
 
   "crons": [
     {

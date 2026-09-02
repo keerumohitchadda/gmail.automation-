@@ -36,7 +36,23 @@ export function createApp() {
     }),
   );
 
-  app.use(express.static(path.join(__dirname, '..', 'public')));
+  const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+  const INDEX_HTML = path.join(PUBLIC_DIR, 'index.html');
+
+  /**
+   * Serve the app shell explicitly rather than leaning on express.static's
+   * directory-index behaviour.
+   *
+   * Behind Vercel's catch-all rewrite the path the function sees for a bare "/" is not
+   * reliably "/", so static's implicit index lookup does not fire and the request
+   * falls through. Naming the file removes the guesswork. "/api" is matched too
+   * because that is the rewrite destination and nothing else answers on it.
+   */
+  app.get(['/', '/api'], (req, res, next) => {
+    res.sendFile(INDEX_HTML, (err) => (err ? next(err) : undefined));
+  });
+
+  app.use(express.static(PUBLIC_DIR));
 
   /**
    * Loads settings and the Google session before any route that needs them.
@@ -263,6 +279,23 @@ export function createApp() {
     watch.scheduleRenewal();
     res.json(store.publicSettings());
   }));
+
+  /**
+   * Last resort for anything that escapes a route handler.
+   *
+   * Without it a throw becomes a bare FUNCTION_INVOCATION_FAILED on Vercel, with the
+   * cause visible only in the platform log — which is a slow way to learn that a file
+   * was missing from the bundle. This says so in the response instead.
+   */
+  app.use((err, req, res, next) => {
+    console.error(`[app] unhandled on ${req.method} ${req.originalUrl}:`, err?.stack || err);
+    if (res.headersSent) return next(err);
+    res.status(500).json({
+      error: err?.message || 'Unhandled error',
+      path: req.originalUrl,
+      code: err?.code,
+    });
+  });
 
   return app;
 }
