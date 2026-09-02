@@ -1,9 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
 
-  "rewrites": [
-    { "source": "/", "destination": "/index.html" },
+  "redirects": [
+    { "source": "/", "destination": "/index.html", "permanent": false }
+  ],
 
+  "rewrites": [
     { "source": "/api/(.*)", "destination": "/api" },
     { "source": "/webhook/(.*)", "destination": "/api" },
     { "source": "/cron/(.*)", "destination": "/api" },
