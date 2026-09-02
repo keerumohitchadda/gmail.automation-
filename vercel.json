@@ -3,14 +3,14 @@
 
   "rewrites": [
     { "source": "/", "destination": "/index.html" },
-    { "source": "/(.*)", "destination": "/api" }
-  ],
 
-  "functions": {
-    "api/index.js": {
-      "includeFiles": "public/**"
-    }
-  },
+    { "source": "/api/(.*)", "destination": "/api" },
+    { "source": "/webhook/(.*)", "destination": "/api" },
+    { "source": "/cron/(.*)", "destination": "/api" },
+    { "source": "/auth/(.*)", "destination": "/api" },
+    { "source": "/oauth2callback", "destination": "/api" },
+    { "source": "/healthz", "destination": "/api" }
+  ],
 
   "crons": [
     {
