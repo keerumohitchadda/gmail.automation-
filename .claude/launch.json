@@ -9,6 +9,14 @@
         "dev"
       ],
       "port": 3000
+    },
+    {
+      "name": "inspire",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "C:/Users/Kirti/OneDrive/Documents/inspire-daily/server.js"
+      ],
+      "port": 3100
     }
   ]
 }
