@@ -6,6 +6,7 @@ import * as forward from './forward.js';
 import * as store from './store.js';
 import * as watch from './watch.js';
 import * as wa from './whatsapp.js';
+import * as tg from './telegram.js';
 
 export const router = express.Router();
 
@@ -86,6 +87,70 @@ router.post('/webhook/whatsapp', async (req, res) => {
     await store.flushed();
   } catch (err) {
     console.error('[webhook] whatsapp handler:', err.message);
+  }
+
+  res.sendStatus(200);
+});
+
+// ---------------------------------------------------------------------------
+// Inbound Telegram updates.
+//
+// This is how the destination is configured: the first message you send the bot
+// records its chat id, so there is nothing to look up or paste in. It also carries
+// the same stop/start/status commands as the WhatsApp side.
+// ---------------------------------------------------------------------------
+
+router.post('/webhook/telegram', async (req, res) => {
+  const check = tg.verifySecret(req.get('x-telegram-bot-api-secret-token'));
+  if (!check.ok) {
+    console.warn(`[webhook] rejected Telegram update: ${check.reason}`);
+    return res.sendStatus(403);
+  }
+
+  const message = req.body?.message;
+  const chatId = message?.chat?.id;
+  if (!chatId) return res.sendStatus(200);
+
+  try {
+    const known = store.get().telegramChatId;
+
+    if (!known) {
+      const name = [message.chat.first_name, message.chat.last_name].filter(Boolean).join(' ');
+      store.update({ telegramChatId: String(chatId), telegramChatName: name || message.chat.username || null });
+      await store.flushed();
+      await tg.sendMessage(
+        chatId,
+        '✅ <b>Linked.</b> Your Gmail alerts will arrive here.\n\nCommands: <code>stop</code>, <code>start</code>, <code>status</code>',
+      );
+      return res.sendStatus(200);
+    }
+
+    // Only the linked chat may drive the bot; anyone else who finds it is ignored.
+    if (String(chatId) !== String(known)) return res.sendStatus(200);
+
+    const text = message.text?.trim().toLowerCase();
+    if (text === 'stop' || text === 'pause' || text === '/stop') {
+      store.update({ enabled: false });
+      await tg.sendMessage(chatId, '🔕 Forwarding paused. Send <b>start</b> to turn it back on.');
+    } else if (text === 'start' || text === 'resume' || text === '/start') {
+      store.update({ enabled: true });
+      await tg.sendMessage(chatId, '🔔 Forwarding is on. New inbox mail will land here.');
+    } else if (text === 'status' || text === '/status') {
+      const s = store.publicSettings();
+      await tg.sendMessage(
+        chatId,
+        [
+          '<b>MailFlow status</b>',
+          `Forwarding: ${s.enabled ? 'on' : 'off'}`,
+          `Gmail watch: ${s.watching ? 'active' : 'inactive'}`,
+          `Categories: ${tg.escapeHtml(s.categories.join(', ') || 'none')}`,
+          `Waiting to send: ${s.queuedCount}`,
+        ].join('\n'),
+      );
+    }
+    await store.flushed();
+  } catch (err) {
+    console.error('[webhook] telegram handler:', err.message);
   }
 
   res.sendStatus(200);

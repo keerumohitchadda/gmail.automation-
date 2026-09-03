@@ -9,6 +9,8 @@ import * as store from './store.js';
 import * as watch from './watch.js';
 import * as forward from './forward.js';
 import * as wa from './whatsapp.js';
+import * as tg from './telegram.js';
+import * as notify from './notify.js';
 import { router as webhooks } from './webhooks.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -196,9 +198,45 @@ export function createApp() {
     res.json({
       ...store.publicSettings(),
       categoriesAvailable: CATEGORIES,
+      channel: notify.activeChannel(),
+      channelName: notify.describeChannel(),
+      linked: Boolean(notify.destination()),
       whatsappConfigured: wa.isConfigured(),
+      telegramConfigured: tg.isConfigured(),
       pubsubConfigured: Boolean(process.env.PUBSUB_TOPIC && process.env.PUBSUB_VERIFICATION_TOKEN),
       inQuietHours: forward.inQuietHours(),
+    });
+  }));
+
+  /**
+   * Registers this deployment's URL as the Telegram webhook.
+   *
+   * Telegram has no dashboard — the webhook is set through the API — so the app
+   * points Telegram at itself. The URL is derived from the incoming request so it is
+   * always the host actually serving this code, rather than something configured
+   * separately and left stale after a rename.
+   */
+  app.post('/api/telegram/register', wrap(async (req, res) => {
+    if (!tg.isConfigured()) {
+      return res.status(400).json({ error: 'Set TELEGRAM_BOT_TOKEN first.' });
+    }
+
+    const host = req.get('x-forwarded-host') || req.get('host');
+    const url = `https://${host}/webhook/telegram`;
+
+    await tg.setWebhook(url);
+    const me = await tg.getMe();
+    const info = await tg.getWebhookInfo();
+
+    res.json({
+      ok: true,
+      bot: `@${me.username}`,
+      webhook: info.url,
+      pendingUpdates: info.pending_update_count,
+      linked: Boolean(store.get().telegramChatId),
+      next: store.get().telegramChatId
+        ? 'Already linked to a chat.'
+        : `Open https://t.me/${me.username} and send it any message to link your chat.`,
     });
   }));
 
@@ -223,8 +261,13 @@ export function createApp() {
       };
     }
 
-    if (patch.enabled && !(patch.toNumber ?? store.get().toNumber)) {
-      return res.status(400).json({ error: 'Set the destination WhatsApp number first.' });
+    if (patch.enabled && !notify.destination() && !(patch.toNumber || '')) {
+      return res.status(400).json({
+        error:
+          notify.activeChannel() === 'telegram'
+            ? 'No destination yet — send your Telegram bot any message to link it.'
+            : 'Set the destination WhatsApp number first.',
+      });
     }
 
     store.update(patch);
@@ -249,8 +292,10 @@ export function createApp() {
   }));
 
   app.post('/api/forwarding/test', wrap(async (req, res) => {
-    if (!store.get().toNumber) {
-      return res.status(400).json({ error: 'Set the destination WhatsApp number first.' });
+    if (!notify.destination()) {
+      return res.status(400).json({
+        error: `No destination linked yet (channel: ${notify.describeChannel()}).`,
+      });
     }
 
     const { via } = await forward.deliver({

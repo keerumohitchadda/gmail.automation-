@@ -1,22 +1,20 @@
 import * as gmail from './gmail.js';
 import * as store from './store.js';
-import * as wa from './whatsapp.js';
+import * as notify from './notify.js';
 
 /**
- * Decides whether a message is worth a WhatsApp ping, and turns the ones that are
- * into a message Meta will actually accept.
+ * Decides whether a message is worth an alert, and hands the ones that are to
+ * notify.js, which owns the channel choice and its formatting.
  *
  * Order matters in `shouldForward`: the blocklist and allowlist are deliberate user
  * overrides, so they are checked before the category buckets that guess for you.
  */
 
-const MAX_TEXT = 3500;
-
 export function shouldForward(msg) {
   const s = store.get();
 
   if (!s.enabled) return { ok: false, reason: 'forwarding is off' };
-  if (!s.toNumber) return { ok: false, reason: 'no destination number set' };
+  if (!notify.destination()) return { ok: false, reason: 'no destination configured' };
 
   const sender = (msg.fromEmail || '').toLowerCase();
   const subject = (msg.subject || '').toLowerCase();
@@ -67,72 +65,20 @@ export function inQuietHours(at = new Date()) {
   const start = minutes(quietHours.start);
   const end = minutes(quietHours.end);
 
-  // A window like 23:00–07:00 crosses midnight, so the test flips from AND to OR.
+  // A window like 23:00-07:00 crosses midnight, so the test flips from AND to OR.
   return start <= end ? now >= start && now < end : now >= start || now < end;
 }
 
-export function formatText(msg) {
-  const s = store.get();
-  const when = new Date(msg.timestamp || Date.now()).toLocaleString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-
-  const lines = [
-    '📬 *New email*',
-    '',
-    `*From:* ${msg.fromName || msg.fromEmail}`,
-    `*Address:* ${msg.fromEmail}`,
-    `*Subject:* ${msg.subject}`,
-    `*Category:* ${msg.category}`,
-    `*Received:* ${when}`,
-  ];
-
-  const body = (msg.body || msg.snippet || '').trim();
-  if (s.bodyChars > 0 && body) {
-    const clipped = body.length > s.bodyChars ? `${body.slice(0, s.bodyChars).trim()}…` : body;
-    lines.push('', '—'.repeat(12), '', clipped);
-  }
-
-  return lines.join('\n').slice(0, MAX_TEXT);
-}
-
-/**
- * Sends one message, preferring the full-text form and dropping to the approved
- * template when Meta's 24-hour window has closed. The window state is tracked in the
- * store from inbound webhooks, but that can be stale — so a window-closed error from
- * the API is also treated as a signal and retried as a template.
- */
+/** Sends one alert on whichever channel is configured. */
 export async function deliver(msg) {
-  const { toNumber } = store.get();
-
-  if (store.isWindowOpen()) {
-    try {
-      await wa.sendText(toNumber, formatText(msg));
-      return { via: 'text' };
-    } catch (err) {
-      if (!wa.isWindowClosedError(err)) throw err;
-      store.update({ lastInboundAt: null });
-      console.warn('[forward] 24h window had already closed; falling back to template');
-    }
-  }
-
-  await wa.sendTemplate(toNumber, [
-    msg.fromName || msg.fromEmail,
-    msg.subject,
-    (msg.snippet || '(no preview)').slice(0, 300),
-  ]);
-
-  return { via: 'template' };
+  return notify.deliver(msg);
 }
 
 /**
  * Fetches, filters and forwards a batch of Gmail message ids.
  *
- * Runs strictly one at a time: WhatsApp orders by arrival, and a parallel burst both
- * scrambles that order and makes the per-number rate limit much easier to trip.
+ * Runs strictly one at a time: chat apps order by arrival, and a parallel burst both
+ * scrambles that order and makes a rate limit much easier to trip.
  */
 export async function processMessageIds(ids, { budgetMs = 0 } = {}) {
   const results = [];
@@ -148,8 +94,7 @@ export async function processMessageIds(ids, { budgetMs = 0 } = {}) {
       continue;
     }
 
-    // Stop early rather than be killed mid-send by the platform's time limit. Whatever
-    // is left is unclaimed, so the next notification or cron run picks it up.
+    // Stop early rather than be killed mid-send by the platform's time limit.
     if (budgetMs && Date.now() - startedAt > budgetMs) {
       results.push({ id, status: 'deferred', reason: 'time budget reached' });
       await store.enqueue({ id, queuedAt: Date.now(), reason: 'deferred' });
@@ -185,8 +130,8 @@ export async function processMessageIds(ids, { budgetMs = 0 } = {}) {
       // Queue it explicitly instead: the next cron run drains it.
       await store.enqueue({ id, queuedAt: Date.now(), subject: msg.subject, reason: 'retry' });
       results.push({ id, status: 'requeued', reason: err.message, subject: msg.subject });
-      console.error(`[forward] failed, queued for retry: ${msg.subject} — ${err.message}`);
-      if (wa.isAuthError(err)) break;
+      console.error(`[forward] failed, queued for retry: ${msg.subject} - ${err.message}`);
+      if (notify.isAuthError(err)) break;
     }
   }
 
@@ -196,8 +141,6 @@ export async function processMessageIds(ids, { budgetMs = 0 } = {}) {
 /**
  * Drains everything waiting: mail quiet hours held back, deliveries that failed, and
  * anything deferred when an invocation ran out of time.
- *
- * Called by the cron endpoint, and after each webhook once the quiet window has closed.
  */
 export async function flushQueue({ budgetMs = 0 } = {}) {
   if (inQuietHours()) return [];
@@ -221,8 +164,8 @@ export async function flushQueue({ budgetMs = 0 } = {}) {
       const { via } = await deliver(msg);
       results.push({ id: entry.id, status: 'sent', via, subject: msg.subject });
     } catch (err) {
-      // Only re-queue a first failure. Something permanently undeliverable — a message
-      // that no longer exists, say — would otherwise cycle forever.
+      // Only re-queue a first failure. Something permanently undeliverable would
+      // otherwise cycle forever.
       if (!entry.retried) {
         await store.enqueue({ ...entry, retried: true });
         results.push({ id: entry.id, status: 'requeued', reason: err.message });
@@ -239,9 +182,7 @@ let sweeper = null;
 
 /**
  * Five-minute quiet-hours sweep, for when the app runs as a long-lived process.
- *
- * A no-op on serverless, where nothing survives between requests — there the cron
- * endpoint does this job instead.
+ * A no-op on serverless, where the cron endpoint does this job instead.
  */
 export function startQuietHoursSweeper() {
   if (sweeper || process.env.VERCEL) return;

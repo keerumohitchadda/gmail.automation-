@@ -24,8 +24,13 @@ const SENT_ID_LIMIT = 500;
 const DEFAULTS = {
   enabled: false,
 
-  // Destination in full international form, digits only. "919876543210".
+  // WhatsApp destination, full international form, digits only. "919876543210".
   toNumber: '',
+
+  // Telegram destination. Learned automatically from the first message you send the
+  // bot, so there is nothing to look up or paste in.
+  telegramChatId: null,
+  telegramChatName: null,
 
   categories: ['Personal', 'Work', 'Finance', 'Shopping'],
 
@@ -131,6 +136,8 @@ export function publicSettings() {
   return {
     enabled: s.enabled,
     toNumber: s.toNumber,
+    telegramChatId: s.telegramChatId,
+    telegramChatName: s.telegramChatName,
     categories: s.categories,
     senderAllowlist: s.senderAllowlist,
     senderBlocklist: s.senderBlocklist,
