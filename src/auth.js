@@ -17,12 +17,7 @@ const LEGACY_TOKEN_KEY = 'mailflow:tokens';
  * Read, modify, label and send. This is a Google "restricted" scope, so the app must
  * stay in Testing mode with your address listed as a test user. See SETUP.md.
  */
-export const SCOPES = [
-  'https://www.googleapis.com/auth/gmail.modify',
-  // Needed only to learn which mailbox just authorised, so tokens can be filed
-  // under the right address.
-  'https://www.googleapis.com/auth/userinfo.email',
-];
+export const SCOPES = ['https://www.googleapis.com/auth/gmail.modify'];
 
 /** { [email]: { tokens, historyId, watchExpiration, connectedAt } } */
 let accounts = null;
@@ -124,12 +119,21 @@ export function authUrl() {
   });
 }
 
-/** Asks Google which mailbox a token set belongs to. */
+/**
+ * Asks Google which mailbox a token set belongs to.
+ *
+ * Uses Gmail's own profile endpoint rather than the userinfo one. userinfo needs a
+ * separate scope, and tokens issued before this change were granted gmail.modify
+ * alone — so asking there fails and an existing session looks unidentifiable.
+ * getProfile returns the address using the scope every token here already has.
+ */
 async function emailForTokens(tokens) {
   const client = newClient();
   client.setCredentials(tokens);
-  const { data } = await google.oauth2({ version: 'v2', auth: client }).userinfo.get();
-  return data.email?.toLowerCase() || null;
+  const { data } = await google.gmail({ version: 'v1', auth: client }).users.getProfile({
+    userId: 'me',
+  });
+  return data.emailAddress?.toLowerCase() || null;
 }
 
 /**
