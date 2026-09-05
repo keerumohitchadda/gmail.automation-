@@ -20,7 +20,10 @@ function config() {
     phoneNumberId: WA_PHONE_NUMBER_ID,
     token: WA_ACCESS_TOKEN,
     templateName: WA_TEMPLATE_NAME || 'new_email_alert',
-    templateLang: WA_TEMPLATE_LANG || 'en',
+    // Meta treats "en" and "en_US" as different languages, and a mismatch fails the
+    // send outright rather than falling back. Accounts created through the current
+    // console get en_US, so that is the default.
+    templateLang: WA_TEMPLATE_LANG || 'en_US',
   };
 }
 
