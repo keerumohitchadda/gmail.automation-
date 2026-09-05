@@ -11,6 +11,8 @@ const QUICK_REPLIES = [
 const state = {
   connected: false,
   email: '',
+  /** Every connected mailbox. The inbox below is a merge of all of them. */
+  accounts: [],
   messages: [],
   category: 'All',
   selectedId: null,
@@ -174,8 +176,15 @@ function renderList() {
       tag.textContent = m.category;
 
       main.append(row, subject, snippet, tag);
+
+      if (state.accounts.length > 1 && m.account) {
+        const who = document.createElement('span');
+        who.className = 'tag inbox-tag';
+        who.textContent = m.account.split('@')[0];
+        main.append(who);
+      }
       li.append(avatar, main);
-      li.onclick = () => openMessage(m.id);
+      li.onclick = () => openMessage(m.id, m.account);
       return li;
     }),
   );
@@ -218,7 +227,7 @@ function renderReader(message) {
   const archiveBtn = document.createElement('button');
   archiveBtn.className = 'btn';
   archiveBtn.textContent = '🗄 Archive';
-  archiveBtn.onclick = () => archiveMessage(message.id);
+  archiveBtn.onclick = () => archiveMessage(message.id, message.account);
 
   actions.append(replyBtn, archiveBtn);
 
@@ -230,12 +239,17 @@ function renderReader(message) {
 }
 
 function render() {
-  el.account.textContent = state.connected ? state.email : 'Not connected';
+  el.account.textContent = !state.connected
+    ? 'Not connected'
+    : state.accounts.length > 1
+      ? `${state.accounts.length} mailboxes · ${state.accounts.join(', ')}`
+      : state.email;
   el.connectView.classList.toggle('hidden', state.connected);
   el.appView.classList.toggle('hidden', !state.connected);
   el.logout.classList.toggle('hidden', !state.connected);
   el.notifyToggle.textContent = `🔔 Alerts: ${state.alertsOn ? 'on' : 'off'}`;
   el.notifyToggle.classList.toggle('is-on', state.alertsOn);
+  document.getElementById('add-account')?.classList.toggle('hidden', !state.connected);
   renderCategories();
   renderList();
 }
@@ -272,19 +286,23 @@ async function refresh({ quiet = false } = {}) {
   }
 }
 
-async function openMessage(id) {
+async function openMessage(id, account) {
   state.selectedId = id;
   renderList();
 
   const summary = state.messages.find((m) => m.id === id);
   renderReader(summary);
 
+  // A Gmail message id only means something inside one mailbox, so every per-message
+  // call has to say which. It travels on the message itself.
+  const acct = encodeURIComponent(account || summary?.account || '');
+
   try {
-    const full = await api(`/api/messages/${id}`);
+    const full = await api(`/api/messages/${id}?account=${acct}`);
     if (state.selectedId === id) renderReader(full);
 
     if (summary?.unread) {
-      await api(`/api/messages/${id}/read`, { method: 'POST' });
+      await api(`/api/messages/${id}/read?account=${acct}`, { method: 'POST' });
       summary.unread = false;
       renderList();
       renderCategories();
@@ -294,9 +312,9 @@ async function openMessage(id) {
   }
 }
 
-async function archiveMessage(id) {
+async function archiveMessage(id, account) {
   try {
-    await api(`/api/messages/${id}/archive`, { method: 'POST' });
+    await api(`/api/messages/${id}/archive?account=${encodeURIComponent(account || '')}`, { method: 'POST' });
     state.messages = state.messages.filter((m) => m.id !== id);
     state.selectedId = null;
     renderReader(null);
@@ -380,7 +398,7 @@ async function send() {
     if (state.replyTo) {
       await api('/api/reply', {
         method: 'POST',
-        body: JSON.stringify({ messageId: state.replyTo.id, body }),
+        body: JSON.stringify({ messageId: state.replyTo.id, account: state.replyTo.account, body }),
       });
     } else {
       await api('/api/send', {
@@ -416,7 +434,7 @@ function notifyNewMail(messages) {
     });
     note.onclick = () => {
       window.focus();
-      openMessage(m.id);
+      openMessage(m.id, m.account);
     };
   }
 }
@@ -481,14 +499,20 @@ async function init() {
   if (location.search) {
     const params = new URLSearchParams(location.search);
     if (params.get('error')) banner(`Google sign-in failed: ${params.get('error')}`);
-    if (params.get('connected')) banner('Connected.', 'ok');
+    const added = params.get('connected');
+    if (added) banner(added === '1' ? 'Connected.' : `Connected ${added}.`, 'ok');
     history.replaceState({}, '', location.pathname);
   }
 
   try {
     const status = await api('/api/status');
     state.connected = status.connected;
-    state.email = status.email || '';
+    state.accounts = (status.accounts || []).map((a) => a.email);
+    state.email = state.accounts[0] || '';
+
+    // One mailbox can lose its session while others are fine; say which.
+    const broken = (status.accounts || []).filter((a) => !a.ok);
+    if (broken.length) banner(`Reconnect needed for ${broken.map((a) => a.email).join(', ')}`);
   } catch (err) {
     banner(err.message);
   }

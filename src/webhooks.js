@@ -179,18 +179,21 @@ router.post('/webhook/gmail', async (req, res) => {
   const { emailAddress, historyId } = payload;
   if (!historyId) return res.sendStatus(204);
 
-  if (!isAuthorized()) {
-    console.warn('[webhook] Gmail push arrived but no Google session is stored');
-    // Not acked: the session may come back, and Pub/Sub should try again.
-    return res.sendStatus(503);
+  // Several mailboxes publish to the same topic, so the notification's address is
+  // what decides whose history to read. Anything for an account we do not hold is
+  // acked rather than retried — retrying will not make it appear.
+  const account = String(emailAddress || '').toLowerCase();
+  if (!account || !isAuthorized(account)) {
+    console.warn(`[webhook] Gmail push for an unknown account: ${emailAddress}`);
+    return res.sendStatus(204);
   }
   if (!store.get().enabled) return res.sendStatus(204);
 
   try {
-    const ids = await watch.newMessageIds(historyId);
+    const ids = await watch.newMessageIds(account, historyId);
     if (ids.length) {
-      console.log(`[webhook] ${ids.length} new message(s) for ${emailAddress}`);
-      await forward.processMessageIds(ids, { budgetMs: BUDGET_MS });
+      console.log(`[webhook] ${ids.length} new message(s) for ${account}`);
+      await forward.processMessageIds(account, ids, { budgetMs: BUDGET_MS });
     }
     await store.flushed();
     res.sendStatus(204);
@@ -244,11 +247,12 @@ router.all('/cron/renew', async (req, res) => {
   if (!store.get().enabled) return res.json({ skipped: 'forwarding is off' });
 
   try {
-    await watch.startWatch();
+    // Every connected mailbox needs its own watch re-armed, not just the first.
+    const watches = await watch.startAllWatches();
     watch.scheduleRenewal();
     const drained = await forward.flushQueue({ budgetMs: BUDGET_MS });
     await store.flushed();
-    res.json({ ok: true, renewed: true, drained: drained.length });
+    res.json({ ok: true, watches, drained: drained.length });
   } catch (err) {
     console.error('[cron] renew failed:', err.message);
     res.status(500).json({ error: err.message });

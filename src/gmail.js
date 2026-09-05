@@ -3,14 +3,22 @@ import { getClient } from './auth.js';
 import { categorize } from './categorize.js';
 import { buildRaw, replySubject } from './mime.js';
 
+/**
+ * Gmail access, always for a named mailbox.
+ *
+ * Every entry point takes the account's email address first. There is no implicit
+ * "current account" — several mailboxes forward to the same phone, and an implied
+ * default is exactly how mail from one would end up attributed to another.
+ */
+
 const METADATA_HEADERS = ['From', 'To', 'Subject', 'Date', 'Message-ID', 'References'];
 
-function api() {
-  return google.gmail({ version: 'v1', auth: getClient() });
+function api(email) {
+  return google.gmail({ version: 'v1', auth: getClient(email) });
 }
 
-export async function profile() {
-  const { data } = await api().users.getProfile({ userId: 'me' });
+export async function profile(email) {
+  const { data } = await api(email).users.getProfile({ userId: 'me' });
   return { email: data.emailAddress, total: data.messagesTotal };
 }
 
@@ -19,8 +27,8 @@ export async function profile() {
  * with `format=metadata` — enough for a list row, and far cheaper than pulling full
  * bodies for messages that may never be opened.
  */
-export async function listInbox({ maxResults = 30, query = 'in:inbox' } = {}) {
-  const gmail = api();
+export async function listInbox(email, { maxResults = 30, query = 'in:inbox' } = {}) {
+  const gmail = api(email);
   const { data } = await gmail.users.messages.list({ userId: 'me', q: query, maxResults });
   const refs = data.messages || [];
 
@@ -33,7 +41,7 @@ export async function listInbox({ maxResults = 30, query = 'in:inbox' } = {}) {
           format: 'metadata',
           metadataHeaders: METADATA_HEADERS,
         });
-        return toMessage(msg);
+        return toMessage(msg, email);
       } catch {
         return null;
       }
@@ -43,35 +51,35 @@ export async function listInbox({ maxResults = 30, query = 'in:inbox' } = {}) {
   return results.filter(Boolean).sort((a, b) => b.timestamp - a.timestamp);
 }
 
-export async function getMessage(id) {
-  const { data } = await api().users.messages.get({ userId: 'me', id, format: 'full' });
-  return { ...toMessage(data), body: extractBody(data.payload) };
+export async function getMessage(email, id) {
+  const { data } = await api(email).users.messages.get({ userId: 'me', id, format: 'full' });
+  return { ...toMessage(data, email), body: extractBody(data.payload) };
 }
 
-export async function markRead(id) {
-  await api().users.messages.modify({
+export async function markRead(email, id) {
+  await api(email).users.messages.modify({
     userId: 'me',
     id,
     requestBody: { removeLabelIds: ['UNREAD'] },
   });
 }
 
-export async function archive(id) {
-  await api().users.messages.modify({
+export async function archive(email, id) {
+  await api(email).users.messages.modify({
     userId: 'me',
     id,
     requestBody: { removeLabelIds: ['INBOX'] },
   });
 }
 
-export async function sendNew({ to, subject, body }) {
+export async function sendNew(email, { to, subject, body }) {
   const raw = buildRaw({ to, subject, body });
-  const { data } = await api().users.messages.send({ userId: 'me', requestBody: { raw } });
+  const { data } = await api(email).users.messages.send({ userId: 'me', requestBody: { raw } });
   return data;
 }
 
 /** Replies in-thread, carrying the headers Gmail needs to keep the conversation together. */
-export async function sendReply({ original, body }) {
+export async function sendReply(email, { original, body }) {
   const references = [original.referencesHeader, original.messageIdHeader]
     .filter(Boolean)
     .join(' ');
@@ -84,7 +92,7 @@ export async function sendReply({ original, body }) {
     references: references || undefined,
   });
 
-  const { data } = await api().users.messages.send({
+  const { data } = await api(email).users.messages.send({
     userId: 'me',
     requestBody: { raw, threadId: original.threadId },
   });
@@ -93,7 +101,7 @@ export async function sendReply({ original, body }) {
 
 // ---- mapping helpers ----
 
-function toMessage(msg) {
+function toMessage(msg, account) {
   const headers = {};
   for (const h of msg.payload?.headers || []) headers[h.name.toLowerCase()] = h.value;
 
@@ -105,6 +113,9 @@ function toMessage(msg) {
   return {
     id: msg.id,
     threadId: msg.threadId,
+    // Which mailbox this arrived in. Carried through so a merged inbox and a
+    // forwarded alert can both say where a message came from.
+    account,
     fromName: parseName(from),
     fromEmail,
     to: headers.to || '',

@@ -1,6 +1,7 @@
 import * as gmail from './gmail.js';
 import * as store from './store.js';
 import * as notify from './notify.js';
+import { listAccounts } from './auth.js';
 
 /**
  * Decides whether a message is worth an alert, and hands the ones that are to
@@ -80,56 +81,61 @@ export async function deliver(msg) {
  * Runs strictly one at a time: chat apps order by arrival, and a parallel burst both
  * scrambles that order and makes a rate limit much easier to trip.
  */
-export async function processMessageIds(ids, { budgetMs = 0 } = {}) {
+export async function processMessageIds(email, ids, { budgetMs = 0 } = {}) {
   const results = [];
   const startedAt = Date.now();
 
   for (const id of ids) {
-    // Serverless runs these concurrently, so the claim has to happen before any work:
-    // it is the single atomic point that decides which invocation owns this message.
-    // Claiming up front means a failure cannot be retried by simply re-running, which
-    // is why failures below go onto the retry queue instead.
-    if (!(await store.claim(id))) {
-      results.push({ id, status: 'skipped', reason: 'already handled' });
+    // Gmail message ids are only unique within a mailbox, so the claim is namespaced
+    // by account. Without that, the same id in two mailboxes would look like a
+    // duplicate and the second mailbox's mail would be silently dropped.
+    const claimKey = `${email}:${id}`;
+
+    // Serverless runs these concurrently, so the claim happens before any work: it is
+    // the single atomic point deciding which invocation owns this message. Claiming up
+    // front means a failure cannot be retried by re-running, which is why failures
+    // below go onto the retry queue instead.
+    if (!(await store.claim(claimKey))) {
+      results.push({ id, account: email, status: 'skipped', reason: 'already handled' });
       continue;
     }
 
     // Stop early rather than be killed mid-send by the platform's time limit.
     if (budgetMs && Date.now() - startedAt > budgetMs) {
-      results.push({ id, status: 'deferred', reason: 'time budget reached' });
-      await store.enqueue({ id, queuedAt: Date.now(), reason: 'deferred' });
+      results.push({ id, account: email, status: 'deferred', reason: 'time budget reached' });
+      await store.enqueue({ id, email, queuedAt: Date.now(), reason: 'deferred' });
       continue;
     }
 
     let msg;
     try {
-      msg = await gmail.getMessage(id);
+      msg = await gmail.getMessage(email, id);
     } catch (err) {
-      results.push({ id, status: 'error', reason: `could not read message: ${err.message}` });
+      results.push({ id, account: email, status: 'error', reason: `could not read message: ${err.message}` });
       continue;
     }
 
     const verdict = shouldForward(msg);
     if (!verdict.ok) {
-      results.push({ id, status: 'filtered', reason: verdict.reason, subject: msg.subject });
+      results.push({ id, account: email, status: 'filtered', reason: verdict.reason, subject: msg.subject });
       continue;
     }
 
     if (inQuietHours()) {
-      await store.enqueue({ id, queuedAt: Date.now(), subject: msg.subject, from: msg.fromEmail });
-      results.push({ id, status: 'queued', reason: 'quiet hours', subject: msg.subject });
+      await store.enqueue({ id, email, queuedAt: Date.now(), subject: msg.subject, from: msg.fromEmail });
+      results.push({ id, account: email, status: 'queued', reason: 'quiet hours', subject: msg.subject });
       continue;
     }
 
     try {
       const { via } = await deliver(msg);
-      results.push({ id, status: 'sent', via, subject: msg.subject });
-      console.log(`[forward] sent (${via}): ${msg.subject}`);
+      results.push({ id, account: email, status: 'sent', via, subject: msg.subject });
+      console.log(`[forward] sent (${via}) for ${email}: ${msg.subject}`);
     } catch (err) {
       // The claim is already spent, so a plain retry would skip this message forever.
       // Queue it explicitly instead: the next cron run drains it.
-      await store.enqueue({ id, queuedAt: Date.now(), subject: msg.subject, reason: 'retry' });
-      results.push({ id, status: 'requeued', reason: err.message, subject: msg.subject });
+      await store.enqueue({ id, email, queuedAt: Date.now(), subject: msg.subject, reason: 'retry' });
+      results.push({ id, account: email, status: 'requeued', reason: err.message, subject: msg.subject });
       console.error(`[forward] failed, queued for retry: ${msg.subject} - ${err.message}`);
       if (notify.isAuthError(err)) break;
     }
@@ -160,9 +166,14 @@ export async function flushQueue({ budgetMs = 0 } = {}) {
       continue;
     }
     try {
-      const msg = await gmail.getMessage(entry.id);
+      // Entries queued before multi-account support carry no address; fall back to
+      // the only mailbox there was, rather than dropping them.
+      const account = entry.email || listAccounts()[0];
+      if (!account) throw new Error('no connected account for this queued message');
+
+      const msg = await gmail.getMessage(account, entry.id);
       const { via } = await deliver(msg);
-      results.push({ id: entry.id, status: 'sent', via, subject: msg.subject });
+      results.push({ id: entry.id, account, status: 'sent', via, subject: msg.subject });
     } catch (err) {
       // Only re-queue a first failure. Something permanently undeliverable would
       // otherwise cycle forever.

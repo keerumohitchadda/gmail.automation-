@@ -2,7 +2,15 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { authUrl, exchangeCode, isAuthorized, logout, restoreSession } from './auth.js';
+import {
+  authUrl,
+  disconnect,
+  disconnectAll,
+  exchangeCode,
+  isAuthorized,
+  listAccounts,
+  loadAccounts,
+} from './auth.js';
 import * as gmail from './gmail.js';
 import { CATEGORIES } from './categorize.js';
 import * as store from './store.js';
@@ -18,9 +26,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /**
  * Builds the Express app.
  *
- * Shared by the local server and the Vercel function so there is exactly one copy of
- * the routing. The differences between the two environments are confined to how state
- * is loaded (below) and to what starts the background timers (server.js only).
+ * Shared by the local server and the Vercel function so there is one copy of the
+ * routing. Environment differences are confined to how state is loaded (below) and
+ * to what starts the background timers (server.js only).
  */
 export function createApp() {
   const app = express();
@@ -41,15 +49,6 @@ export function createApp() {
   const PUBLIC_DIR = path.join(__dirname, '..', 'public');
   const INDEX_HTML = path.join(PUBLIC_DIR, 'index.html');
 
-  /**
-   * Serve the app shell explicitly rather than leaning on express.static's
-   * directory-index behaviour.
-   *
-   * Behind Vercel's catch-all rewrite the path the function sees for a bare "/" is not
-   * reliably "/", so static's implicit index lookup does not fire and the request
-   * falls through. Naming the file removes the guesswork. "/api" is matched too
-   * because that is the rewrite destination and nothing else answers on it.
-   */
   app.get(['/', '/api'], (req, res, next) => {
     res.sendFile(INDEX_HTML, (err) => (err ? next(err) : undefined));
   });
@@ -57,19 +56,17 @@ export function createApp() {
   app.use(express.static(PUBLIC_DIR));
 
   /**
-   * Loads settings and the Google session before any route that needs them.
+   * Loads settings and every Google session before any route that needs them.
    *
-   * Deliberately reloaded on every such request rather than cached in module scope.
+   * Deliberately reloaded on each such request rather than cached in module scope.
    * Serverless keeps warm instances around, so a cached snapshot would go stale the
    * moment another invocation — or the cron job — changed something.
-   *
-   * Static files skip this, which is most of the traffic.
    */
   const needsState = ['/api', '/webhook', '/cron', '/auth', '/oauth2callback', '/healthz'];
   app.use(needsState, async (req, res, next) => {
     try {
       await store.load();
-      await restoreSession();
+      await loadAccounts();
       next();
     } catch (err) {
       console.error('[app] could not load state:', err.message);
@@ -90,7 +87,7 @@ export function createApp() {
 
         if (res.headersSent) return;
         if (status === 401) {
-          return res.status(401).json({ error: 'Session expired. Reconnect your account.' });
+          return res.status(401).json({ error: 'Session expired. Reconnect that account.' });
         }
         if (status === 403) {
           return res.status(403).json({
@@ -109,6 +106,20 @@ export function createApp() {
   function requireAuth(req, res, next) {
     if (!isAuthorized()) return res.status(401).json({ error: 'Not connected.' });
     next();
+  }
+
+  /**
+   * Resolves which mailbox a request is about.
+   *
+   * Per-message routes must name their account, because a Gmail message id only means
+   * something within one mailbox. Falling back to the first account keeps older
+   * clients working while there is only one.
+   */
+  function accountFor(req) {
+    const asked = String(req.query.account || req.body?.account || '').toLowerCase();
+    if (asked && isAuthorized(asked)) return asked;
+    if (asked) throw new Error(`Not connected: ${asked}`);
+    return listAccounts()[0];
   }
 
   // Webhooks authenticate with their own secrets, not the Google session.
@@ -130,45 +141,93 @@ export function createApp() {
     if (!code) return res.redirect('/?error=missing_code');
 
     try {
-      await exchangeCode(String(code));
+      const email = await exchangeCode(String(code));
       await store.flushed();
-      res.redirect('/?connected=1');
+      res.redirect(`/?connected=${encodeURIComponent(email)}`);
     } catch (err) {
       res.redirect(`/?error=${encodeURIComponent(err.message)}`);
     }
   });
 
+  /** Disconnects one account, or all of them when none is named. */
   app.post('/api/logout', wrap(async (req, res) => {
-    await logout();
-    res.json({ ok: true });
+    const email = String(req.body?.account || '').toLowerCase();
+    if (email) {
+      await watch.stopWatch(email).catch(() => {});
+      await disconnect(email);
+    } else {
+      for (const account of listAccounts()) await watch.stopWatch(account).catch(() => {});
+      await disconnectAll();
+    }
+    res.json({ ok: true, accounts: listAccounts() });
   }));
 
   app.get('/api/status', wrap(async (req, res) => {
-    if (!isAuthorized()) return res.json({ connected: false });
-    const me = await gmail.profile();
-    res.json({ connected: true, email: me.email });
+    const emails = listAccounts();
+    if (!emails.length) return res.json({ connected: false, accounts: [] });
+
+    // Reported per account: one mailbox can have an expired session while another
+    // is fine, and a single "connected" flag would hide that.
+    const accounts = await Promise.all(
+      emails.map(async (email) => {
+        try {
+          const me = await gmail.profile(email);
+          return { email, ok: true, total: me.total };
+        } catch (err) {
+          return { email, ok: false, error: err.message };
+        }
+      }),
+    );
+
+    res.json({ connected: true, accounts, email: emails[0] });
   }));
 
   // ---- mail ----
 
+  /** Merged inbox across every connected mailbox, newest first. */
   app.get('/api/messages', requireAuth, wrap(async (req, res) => {
     const max = Math.min(Number(req.query.max) || 30, 100);
     const search = String(req.query.q || '').trim();
     const query = search ? `in:inbox ${search}` : 'in:inbox';
-    res.json({ messages: await gmail.listInbox({ maxResults: max, query }) });
+    const only = String(req.query.account || '').toLowerCase();
+
+    const emails = only ? [only] : listAccounts();
+
+    // One slow or broken mailbox should not blank the whole inbox, so failures are
+    // reported alongside whatever else came back.
+    const settled = await Promise.all(
+      emails.map(async (email) => {
+        try {
+          return { email, messages: await gmail.listInbox(email, { maxResults: max, query }) };
+        } catch (err) {
+          return { email, messages: [], error: err.message };
+        }
+      }),
+    );
+
+    const messages = settled
+      .flatMap((r) => r.messages)
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, max);
+
+    res.json({
+      messages,
+      accounts: emails,
+      errors: settled.filter((r) => r.error).map((r) => ({ account: r.email, error: r.error })),
+    });
   }));
 
   app.get('/api/messages/:id', requireAuth, wrap(async (req, res) => {
-    res.json(await gmail.getMessage(req.params.id));
+    res.json(await gmail.getMessage(accountFor(req), req.params.id));
   }));
 
   app.post('/api/messages/:id/read', requireAuth, wrap(async (req, res) => {
-    await gmail.markRead(req.params.id);
+    await gmail.markRead(accountFor(req), req.params.id);
     res.json({ ok: true });
   }));
 
   app.post('/api/messages/:id/archive', requireAuth, wrap(async (req, res) => {
-    await gmail.archive(req.params.id);
+    await gmail.archive(accountFor(req), req.params.id);
     res.json({ ok: true });
   }));
 
@@ -177,9 +236,10 @@ export function createApp() {
     if (!messageId || !body?.trim()) {
       return res.status(400).json({ error: 'messageId and body are required.' });
     }
+    const account = accountFor(req);
     // Re-fetch server-side so reply headers come from Gmail, not the browser.
-    const original = await gmail.getMessage(messageId);
-    await gmail.sendReply({ original, body });
+    const original = await gmail.getMessage(account, messageId);
+    await gmail.sendReply(account, { original, body });
     res.json({ ok: true });
   }));
 
@@ -188,16 +248,17 @@ export function createApp() {
     if (!to?.trim() || !body?.trim()) {
       return res.status(400).json({ error: 'A recipient and a message body are required.' });
     }
-    await gmail.sendNew({ to: to.trim(), subject: subject || '(no subject)', body });
+    await gmail.sendNew(accountFor(req), { to: to.trim(), subject: subject || '(no subject)', body });
     res.json({ ok: true });
   }));
 
-  // ---- WhatsApp forwarding ----
+  // ---- forwarding ----
 
   app.get('/api/forwarding', wrap(async (req, res) => {
     res.json({
       ...store.publicSettings(),
       categoriesAvailable: CATEGORIES,
+      accounts: listAccounts(),
       channel: notify.activeChannel(),
       channelName: notify.describeChannel(),
       linked: Boolean(notify.destination()),
@@ -208,23 +269,13 @@ export function createApp() {
     });
   }));
 
-  /**
-   * Registers this deployment's URL as the Telegram webhook.
-   *
-   * Telegram has no dashboard — the webhook is set through the API — so the app
-   * points Telegram at itself. The URL is derived from the incoming request so it is
-   * always the host actually serving this code, rather than something configured
-   * separately and left stale after a rename.
-   */
   app.post('/api/telegram/register', wrap(async (req, res) => {
     if (!tg.isConfigured()) {
       return res.status(400).json({ error: 'Set TELEGRAM_BOT_TOKEN first.' });
     }
 
     const host = req.get('x-forwarded-host') || req.get('host');
-    const url = `https://${host}/webhook/telegram`;
-
-    await tg.setWebhook(url);
+    await tg.setWebhook(`https://${host}/webhook/telegram`);
     const me = await tg.getMe();
     const info = await tg.getWebhookInfo();
 
@@ -232,7 +283,6 @@ export function createApp() {
       ok: true,
       bot: `@${me.username}`,
       webhook: info.url,
-      pendingUpdates: info.pending_update_count,
       linked: Boolean(store.get().telegramChatId),
       next: store.get().telegramChatId
         ? 'Already linked to a chat.'
@@ -273,19 +323,26 @@ export function createApp() {
     store.update(patch);
     await store.flushed();
 
-    // Turning forwarding on is what registers the Gmail watch, so the two stay in step.
+    // Turning forwarding on arms a watch for every mailbox, so adding an account
+    // later needs nothing more than connecting it.
     if (patch.enabled === true && isAuthorized()) {
-      try {
-        await watch.startWatch();
-        watch.scheduleRenewal();
-      } catch (err) {
+      const watches = await watch.startAllWatches();
+      watch.scheduleRenewal();
+      const failed = watches.filter((w) => !w.ok);
+      if (failed.length) {
         return res.json({
           ...store.publicSettings(),
-          warning: `Settings saved, but the Gmail watch could not start: ${err.message}`,
+          watches,
+          warning: `Saved, but ${failed.length} watch(es) could not start: ${failed[0].error}`,
         });
       }
-    } else if (patch.enabled === false && store.get().watchExpiration) {
-      await watch.stopWatch().catch((err) => console.error('[watch]', err.message));
+      return res.json({ ...store.publicSettings(), watches });
+    }
+
+    if (patch.enabled === false) {
+      for (const email of listAccounts()) {
+        await watch.stopWatch(email).catch((err) => console.error('[watch]', err.message));
+      }
     }
 
     res.json(store.publicSettings());
@@ -300,11 +357,12 @@ export function createApp() {
 
     const { via } = await forward.deliver({
       id: 'test',
+      account: listAccounts()[0] || 'mailflow',
       fromName: 'MailFlow',
       fromEmail: 'mailflow@localhost',
-      subject: 'Test alert - your WhatsApp forwarding works',
-      snippet: 'If this reached your phone, Gmail to WhatsApp is wired up correctly.',
-      body: 'If this reached your phone, Gmail to WhatsApp is wired up correctly.\n\nReply "status" any time for a summary, "stop" to pause, "start" to resume.',
+      subject: 'Test alert - your forwarding works',
+      snippet: 'If this reached your phone, Gmail forwarding is wired up correctly.',
+      body: 'If this reached your phone, Gmail forwarding is wired up correctly.\n\nReply "status" any time for a summary, "stop" to pause, "start" to resume.',
       category: 'Personal',
       timestamp: Date.now(),
     });
@@ -312,25 +370,27 @@ export function createApp() {
     res.json({ ok: true, via });
   }));
 
-  /** Manual catch-up, for when notifications were missed. */
+  /** Manual catch-up across every mailbox, for when notifications were missed. */
   app.post('/api/forwarding/sync', requireAuth, wrap(async (req, res) => {
-    const recent = await gmail.listInbox({ maxResults: 15, query: 'in:inbox is:unread' });
-    const results = await forward.processMessageIds(recent.map((m) => m.id), { budgetMs: 6000 });
+    const results = [];
+    for (const email of listAccounts()) {
+      const recent = await gmail.listInbox(email, { maxResults: 15, query: 'in:inbox is:unread' });
+      results.push(
+        ...(await forward.processMessageIds(email, recent.map((m) => m.id), { budgetMs: 5000 })),
+      );
+    }
     res.json({ results });
   }));
 
   app.post('/api/forwarding/watch', requireAuth, wrap(async (req, res) => {
-    await watch.startWatch();
+    const watches = await watch.startAllWatches();
     watch.scheduleRenewal();
-    res.json(store.publicSettings());
+    res.json({ ...store.publicSettings(), watches });
   }));
 
   /**
-   * Last resort for anything that escapes a route handler.
-   *
-   * Without it a throw becomes a bare FUNCTION_INVOCATION_FAILED on Vercel, with the
-   * cause visible only in the platform log — which is a slow way to learn that a file
-   * was missing from the bundle. This says so in the response instead.
+   * Last resort for anything that escapes a route handler. Without it a throw becomes
+   * a bare FUNCTION_INVOCATION_FAILED with the cause only in the platform log.
    */
   app.use((err, req, res, next) => {
     console.error(`[app] unhandled on ${req.method} ${req.originalUrl}:`, err?.stack || err);

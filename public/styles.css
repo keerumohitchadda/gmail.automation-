@@ -844,3 +844,15 @@ dialog[open] { animation: pop .2s cubic-bezier(.2, .8, .3, 1); }
     transition-duration: .001ms !important;
   }
 }
+
+/* Which mailbox a message arrived in. Only rendered when more than one is
+   connected, and deliberately quieter than the category tag beside it. */
+.inbox-tag {
+  margin-left: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 550;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.message.selected .inbox-tag { background: color-mix(in srgb, var(--accent) 12%, transparent); }

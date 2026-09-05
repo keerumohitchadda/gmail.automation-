@@ -1,31 +1,33 @@
 import 'dotenv/config';
 
 import { createApp } from './src/app.js';
-import { isAuthorized, restoreSession } from './src/auth.js';
+import { listAccounts, loadAccounts } from './src/auth.js';
 import * as store from './src/store.js';
 import * as watch from './src/watch.js';
 import * as forward from './src/forward.js';
 import * as wa from './src/whatsapp.js';
+import * as notify from './src/notify.js';
 import * as kv from './src/kv.js';
 
 /**
  * Local / VPS entry point: a long-lived process.
  *
- * The routing lives in src/app.js, shared with the Vercel function. What is unique
- * here is everything that needs a process to outlive a request — the Gmail watch
- * renewal timer, the quiet-hours sweeper, and graceful shutdown.
+ * Routing lives in src/app.js, shared with the Vercel function. What is unique here
+ * is everything needing a process that outlives a request — watch renewal, the
+ * quiet-hours sweeper, and graceful shutdown.
  */
 
 const PORT = Number(process.env.PORT) || 3000;
 const app = createApp();
 
 await store.load();
-const restored = await restoreSession();
+await loadAccounts();
+const accounts = listAccounts();
 
-if (restored && store.get().enabled) {
-  // A watch lasts seven days and does not survive a long downtime, so re-register on
-  // every boot rather than trusting the stored expiry.
-  watch.startWatch().catch((err) => console.error('[watch] could not start:', err.message));
+if (accounts.length && store.get().enabled) {
+  // A watch lasts seven days and does not survive a long downtime, so re-arm every
+  // mailbox on boot rather than trusting the stored expiry.
+  watch.startAllWatches().catch((err) => console.error('[watch] could not start:', err.message));
   watch.scheduleRenewal();
 }
 forward.startQuietHoursSweeper();
@@ -34,13 +36,13 @@ const server = app.listen(PORT, process.env.HOST || undefined, () => {
   console.log(`\n  MailFlow running at http://localhost:${PORT}`);
   console.log(`  Storage: ${kv.describe()}`);
   console.log(
-    restored
-      ? `  Google session restored${isAuthorized() ? '' : ' (but credentials look empty)'}.`
-      : '  Not connected yet — open the page and click "Connect Gmail".',
+    accounts.length
+      ? `  Mailboxes: ${accounts.join(', ')}`
+      : '  No mailbox connected yet — open the page and click "Connect Gmail".',
   );
   console.log(
-    `  WhatsApp forwarding: ${store.get().enabled ? 'on' : 'off'}` +
-      `${wa.isConfigured() ? '' : ' (credentials missing — see WHATSAPP-SETUP.md)'}\n`,
+    `  Forwarding: ${store.get().enabled ? 'on' : 'off'} via ${notify.describeChannel()}` +
+      `${wa.isConfigured() || notify.activeChannel() ? '' : ' (no channel configured)'}\n`,
   );
 });
 

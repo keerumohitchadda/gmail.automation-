@@ -1,6 +1,16 @@
 import * as store from './store.js';
 import * as tg from './telegram.js';
 import * as wa from './whatsapp.js';
+import { listAccounts } from './auth.js';
+
+/**
+ * Which mailbox an alert is about, shown only when more than one is connected.
+ * With a single account it is noise; with two it is the first thing you want to know.
+ */
+function inboxLine(msg) {
+  if (!msg.account || listAccounts().length < 2) return null;
+  return msg.account;
+}
 
 /**
  * Picks a delivery channel and formats for it.
@@ -57,6 +67,9 @@ export function formatTelegram(msg) {
     `<b>Received:</b> ${e(when(msg.timestamp))}`,
   ];
 
+  const inbox = inboxLine(msg);
+  if (inbox) lines.splice(2, 0, `<b>Inbox:</b> ${e(inbox)}`);
+
   const preview = bodyPreview(msg);
   if (preview) lines.push('', '<pre>' + e(preview) + '</pre>');
 
@@ -73,6 +86,9 @@ export function formatWhatsApp(msg) {
     `*Category:* ${msg.category}`,
     `*Received:* ${when(msg.timestamp)}`,
   ];
+
+  const inbox = inboxLine(msg);
+  if (inbox) lines.splice(2, 0, `*Inbox:* ${inbox}`);
 
   const preview = bodyPreview(msg);
   if (preview) lines.push('', '—'.repeat(12), '', preview);
