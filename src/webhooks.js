@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import express from 'express';
 
-import { isAuthorized } from './auth.js';
+import { isAuthorized, listAccounts, getAccount } from './auth.js';
 import * as forward from './forward.js';
 import * as store from './store.js';
 import * as watch from './watch.js';
@@ -213,13 +213,26 @@ router.post('/webhook/gmail', async (req, res) => {
 /** Liveness probe. Deliberately reveals nothing sensitive. */
 router.get('/healthz', (req, res) => {
   const s = store.get();
+  const settings = store.publicSettings();
+
+  // Reported per mailbox: one account's watch can lapse while another is fine, and a
+  // single expiry field would hide exactly the failure this probe exists to catch.
+  const mailboxes = listAccounts().map((email) => {
+    const expires = getAccount(email)?.watchExpiration || null;
+    return {
+      email,
+      watchExpiresAt: expires ? new Date(expires).toISOString() : null,
+      watchActive: Boolean(expires && expires > Date.now()),
+    };
+  });
+
   res.json({
     ok: true,
-    connected: isAuthorized(),
+    connected: mailboxes.length > 0,
     forwarding: s.enabled,
-    watchExpiresAt: s.watchExpiration ? new Date(s.watchExpiration).toISOString() : null,
-    queued: store.publicSettings().queuedCount,
-    storage: store.publicSettings().storage,
+    mailboxes,
+    queued: settings.queuedCount,
+    storage: settings.storage,
   });
 });
 
