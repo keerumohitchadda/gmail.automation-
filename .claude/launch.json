@@ -17,6 +17,14 @@
         "C:/Users/Kirti/OneDrive/Documents/inspire-daily/server.js"
       ],
       "port": 3100
+    },
+    {
+      "name": "kids",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "C:/Users/Kirti/OneDrive/Documents/kids-learn/server.js"
+      ],
+      "port": 3200
     }
   ]
 }
