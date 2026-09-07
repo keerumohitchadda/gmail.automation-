@@ -120,29 +120,33 @@ export async function deliver(msg) {
     return { via: 'telegram' };
   }
 
-  // Always attempt full text first, and let Meta be the judge of whether the
-  // 24-hour window is open.
+  // The template is the reliable path and therefore the default.
   //
-  // The window used to be inferred from inbound webhooks, but Meta does not deliver
-  // those to an unpublished app — so that signal reads "closed" forever and every
-  // alert degrades to the template even when free-form would have been accepted.
-  // Asking and handling the rejection costs one wasted call when the window really is
-  // shut, and gets the whole email through whenever it is not.
-  try {
-    await wa.sendText(to, formatWhatsApp(msg));
-    if (!store.isWindowOpen()) store.update({ lastInboundAt: Date.now() });
-    return { via: 'text' };
-  } catch (err) {
-    if (!wa.isWindowClosedError(err)) throw err;
-    store.update({ lastInboundAt: null });
-    console.warn('[notify] free-form rejected; falling back to the approved template');
+  // Free-form text is richer but only delivers inside Meta's 24-hour window, and Meta
+  // does not say when it is shut: the API returns 200 with a message id and then drops
+  // the message. So "try text and handle the rejection" cannot work — there is no
+  // rejection to handle, only silence. That silence is what made a whole day of
+  // alerts vanish while every call looked successful.
+  //
+  // Text is therefore attempted only when an inbound message proves the window is
+  // open, and even then a genuine window-closed error falls through to the template.
+  if (store.isWindowOpen()) {
+    try {
+      await wa.sendText(to, formatWhatsApp(msg));
+      return { via: 'text' };
+    } catch (err) {
+      if (!wa.isWindowClosedError(err)) throw err;
+      store.update({ lastInboundAt: null });
+      console.warn('[notify] window had already closed; using the template');
+    }
   }
 
-  await wa.sendTemplate(to, [
-    msg.fromName || msg.fromEmail,
-    msg.subject,
-    (msg.snippet || '(no preview)').slice(0, 300),
-  ]);
+  // Since the template now carries most alerts rather than being a fallback, give its
+  // preview variable as much of the email as Meta allows — a template parameter tops
+  // out around 1024 characters, and whitespace is flattened out of it anyway.
+  const preview = (bodyPreview(msg) || msg.snippet || '(no preview)').slice(0, 850);
+
+  await wa.sendTemplate(to, [msg.fromName || msg.fromEmail, msg.subject, preview]);
   return { via: 'template' };
 }
 
