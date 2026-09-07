@@ -22,6 +22,11 @@ const OVERRIDABLE = new Set([
   'WA_TEMPLATE_NAME',
   'WA_TEMPLATE_LANG',
   'TELEGRAM_BOT_TOKEN',
+  // The scheduler's own credentials. Included so a deployment whose CRON_TOKEN was
+  // never set can still be driven — the maintenance endpoint is what drains a stuck
+  // queue, and needing a redeploy to reach it defeats the point.
+  'CRON_TOKEN',
+  'CRON_SECRET',
 ]);
 
 let overrides = null;

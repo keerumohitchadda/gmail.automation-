@@ -7,6 +7,7 @@ import * as store from './store.js';
 import * as watch from './watch.js';
 import * as wa from './whatsapp.js';
 import * as tg from './telegram.js';
+import * as secrets from './secrets.js';
 
 export const router = express.Router();
 
@@ -249,8 +250,8 @@ router.get('/healthz', (req, res) => {
 router.all('/cron/renew', async (req, res) => {
   const bearer = (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
   const authorised =
-    secretMatches(req.query.token, process.env.CRON_TOKEN) ||
-    secretMatches(bearer, process.env.CRON_SECRET);
+    secretMatches(req.query.token, secrets.get('CRON_TOKEN')) ||
+    secretMatches(bearer, secrets.get('CRON_SECRET'));
 
   if (!authorised) {
     console.warn('[cron] rejected renew: bad token');
