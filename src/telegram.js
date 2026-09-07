@@ -9,14 +9,16 @@
 
 import crypto from 'node:crypto';
 
+import * as secrets from './secrets.js';
+
 const API = 'https://api.telegram.org';
 
 export function isConfigured() {
-  return Boolean(process.env.TELEGRAM_BOT_TOKEN);
+  return Boolean(secrets.get('TELEGRAM_BOT_TOKEN'));
 }
 
 function token() {
-  const value = process.env.TELEGRAM_BOT_TOKEN;
+  const value = secrets.get('TELEGRAM_BOT_TOKEN');
   if (!value) {
     throw new Error('Missing TELEGRAM_BOT_TOKEN. Create a bot with @BotFather and set it in Vercel.');
   }

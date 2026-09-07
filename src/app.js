@@ -19,6 +19,7 @@ import * as forward from './forward.js';
 import * as wa from './whatsapp.js';
 import * as tg from './telegram.js';
 import * as notify from './notify.js';
+import * as secrets from './secrets.js';
 import { router as webhooks } from './webhooks.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -65,6 +66,7 @@ export function createApp() {
   const needsState = ['/api', '/webhook', '/cron', '/auth', '/oauth2callback', '/healthz'];
   app.use(needsState, async (req, res, next) => {
     try {
+      await secrets.load();
       await store.load();
       await loadAccounts();
       next();
@@ -262,6 +264,7 @@ export function createApp() {
       channel: notify.activeChannel(),
       channelName: notify.describeChannel(),
       linked: Boolean(notify.destination()),
+      overriddenSecrets: secrets.listOverridden(),
       whatsappConfigured: wa.isConfigured(),
       telegramConfigured: tg.isConfigured(),
       pubsubConfigured: Boolean(process.env.PUBSUB_TOPIC && process.env.PUBSUB_VERIFICATION_TOKEN),

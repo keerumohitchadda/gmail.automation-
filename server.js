@@ -8,6 +8,7 @@ import * as forward from './src/forward.js';
 import * as wa from './src/whatsapp.js';
 import * as notify from './src/notify.js';
 import * as kv from './src/kv.js';
+import * as secrets from './src/secrets.js';
 
 /**
  * Local / VPS entry point: a long-lived process.
@@ -20,6 +21,7 @@ import * as kv from './src/kv.js';
 const PORT = Number(process.env.PORT) || 3000;
 const app = createApp();
 
+await secrets.load();
 await store.load();
 await loadAccounts();
 const accounts = listAccounts();

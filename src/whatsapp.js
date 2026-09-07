@@ -1,14 +1,16 @@
 import crypto from 'node:crypto';
 
+import * as secrets from './secrets.js';
+
 const GRAPH_VERSION = process.env.WA_GRAPH_VERSION || 'v21.0';
 
 function config() {
-  const {
-    WA_PHONE_NUMBER_ID,
-    WA_ACCESS_TOKEN,
-    WA_TEMPLATE_NAME,
-    WA_TEMPLATE_LANG,
-  } = process.env;
+  // Read through secrets rather than process.env directly: Meta's access token
+  // expires on its own, and a rotated value must take effect without a redeploy.
+  const WA_PHONE_NUMBER_ID = secrets.get('WA_PHONE_NUMBER_ID');
+  const WA_ACCESS_TOKEN = secrets.get('WA_ACCESS_TOKEN');
+  const WA_TEMPLATE_NAME = secrets.get('WA_TEMPLATE_NAME');
+  const WA_TEMPLATE_LANG = secrets.get('WA_TEMPLATE_LANG');
 
   if (!WA_PHONE_NUMBER_ID || !WA_ACCESS_TOKEN) {
     throw new Error(
@@ -28,7 +30,7 @@ function config() {
 }
 
 export function isConfigured() {
-  return Boolean(process.env.WA_PHONE_NUMBER_ID && process.env.WA_ACCESS_TOKEN);
+  return Boolean(secrets.get('WA_PHONE_NUMBER_ID') && secrets.get('WA_ACCESS_TOKEN'));
 }
 
 async function post(payload) {
@@ -123,7 +125,7 @@ export function normalizeNumber(value) {
  * Without this the webhook is an open endpoint anyone can post fake events to.
  */
 export function verifySignature(rawBody, header) {
-  const secret = process.env.WA_APP_SECRET;
+  const secret = secrets.get('WA_APP_SECRET');
   if (!secret) return { ok: false, reason: 'WA_APP_SECRET is not set' };
   if (!header?.startsWith('sha256=')) return { ok: false, reason: 'missing signature header' };
 
