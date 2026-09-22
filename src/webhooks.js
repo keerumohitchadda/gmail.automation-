@@ -8,6 +8,7 @@ import * as watch from './watch.js';
 import * as wa from './whatsapp.js';
 import * as tg from './telegram.js';
 import * as secrets from './secrets.js';
+import * as notify from './notify.js';
 
 export const router = express.Router();
 
@@ -264,9 +265,25 @@ router.all('/cron/renew', async (req, res) => {
     // Every connected mailbox needs its own watch re-armed, not just the first.
     const watches = await watch.startAllWatches();
     watch.scheduleRenewal();
+
+    // A mailbox whose Google session has ended cannot be fixed from here — it needs
+    // someone to sign in again. This daily run is the only thing that reliably
+    // notices, so it is where the alert belongs.
+    const expired = watches
+      .filter((w) => !w.ok && /invalid_grant|invalid_credentials|unauthorized/i.test(w.error || ''))
+      .map((w) => w.email);
+
+    let alerted = null;
+    if (expired.length) {
+      const host = req.get('x-forwarded-host') || req.get('host');
+      alerted = await notify
+        .alertSessionExpired(expired, `https://${host}`)
+        .catch((err) => ({ error: err.message }));
+    }
+
     const drained = await forward.flushQueue({ budgetMs: BUDGET_MS });
     await store.flushed();
-    res.json({ ok: true, watches, drained: drained.length });
+    res.json({ ok: true, watches, drained: drained.length, expired, alerted });
   } catch (err) {
     console.error('[cron] renew failed:', err.message);
     res.status(500).json({ error: err.message });

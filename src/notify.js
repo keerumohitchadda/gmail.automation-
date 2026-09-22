@@ -150,6 +150,46 @@ export async function deliver(msg) {
   return { via: 'template' };
 }
 
+/**
+ * Tells you on your phone when a mailbox has lost its Google session.
+ *
+ * Without this the failure is invisible: forwarding simply stops, the app shows an
+ * empty inbox, and you find out days later. Google ends these sessions on its own
+ * schedule, so the app has to be the one that notices.
+ *
+ * Rate-limited to once a day per mailbox — the daily cron would otherwise report the
+ * same dead account every morning until it is reconnected.
+ */
+export async function alertSessionExpired(emails, appUrl) {
+  const to = destination();
+  if (!to || !emails.length) return { sent: 0 };
+
+  const DAY = 24 * 60 * 60 * 1000;
+  const notified = { ...(store.get().deadNotifiedAt || {}) };
+  const due = emails.filter((email) => !notified[email] || Date.now() - notified[email] > DAY);
+  if (!due.length) return { sent: 0 };
+
+  const text =
+    `Gmail access for ${due.join(', ')} has expired, so forwarding has stopped. ` +
+    `Open ${appUrl} and use Add Account to sign in again.`;
+
+  await deliver({
+    id: 'session-expired',
+    fromName: 'MailFlow',
+    fromEmail: 'mailflow',
+    subject: 'Reconnect needed — forwarding has stopped',
+    snippet: text,
+    body: text,
+    category: 'Personal',
+    timestamp: Date.now(),
+  });
+
+  for (const email of due) notified[email] = Date.now();
+  store.update({ deadNotifiedAt: notified });
+
+  return { sent: due.length, emails: due };
+}
+
 /** Plain-text reply on the active channel, for the stop/start/status commands. */
 export async function replyTo(to, text) {
   if (activeChannel() === 'telegram') return tg.sendMessage(to, tg.escapeHtml(text));

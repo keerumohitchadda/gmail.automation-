@@ -52,6 +52,10 @@ const DEFAULTS = {
   // Unix ms of the last inbound WhatsApp message. Meta only allows free-form replies
   // for 24h after this; outside it we must fall back to an approved template.
   lastInboundAt: null,
+
+  // When each mailbox was last reported dead, so the daily cron does not repeat
+  // the same warning every morning until it is reconnected.
+  deadNotifiedAt: {},
 };
 
 let snapshot = null;
