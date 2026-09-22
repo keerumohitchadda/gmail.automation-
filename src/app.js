@@ -144,6 +144,18 @@ export function createApp() {
 
     try {
       const email = await exchangeCode(String(code));
+
+      // Arm the watch straight away. A reconnected mailbox has a working session but
+      // no live watch — Gmail stops notifying when the old one lapses, and nothing
+      // else re-arms it until the next daily run. Skipping this is why a reconnect
+      // could look successful while no mail was forwarded.
+      if (store.get().enabled) {
+        await watch.startWatch(email).catch((err) => {
+          console.error(`[auth] connected ${email} but the watch failed: ${err.message}`);
+        });
+        watch.scheduleRenewal();
+      }
+
       await store.flushed();
       res.redirect(`/?connected=${encodeURIComponent(email)}`);
     } catch (err) {
