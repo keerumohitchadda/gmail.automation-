@@ -18,6 +18,8 @@ const state = {
   selectedId: null,
   search: '',
   alertsOn: false,
+  /** Mailboxes that failed to load, reported per account by /api/messages. */
+  accountErrors: [],
   /** Newest timestamp we have already alerted on, so a refresh doesn't re-notify. */
   lastSeen: Number(localStorage.getItem('lastSeen') || 0),
   /** null = compose new, otherwise the message being replied to. */
@@ -193,8 +195,11 @@ function renderList() {
     const li = document.createElement('li');
     li.className = 'list-status muted';
     li.style.padding = '24px 16px';
-    li.textContent =
-      state.category === 'All' ? 'Nothing in your inbox.' : `Nothing in ${state.category}.`;
+    li.textContent = state.accountErrors.length
+      ? 'Could not load this mailbox — reconnect it above.'
+      : state.category === 'All'
+        ? 'Nothing in your inbox.'
+        : `Nothing in ${state.category}.`;
     el.list.append(li);
   }
 }
@@ -263,7 +268,13 @@ async function refresh({ quiet = false } = {}) {
   try {
     const params = new URLSearchParams({ max: '30' });
     if (state.search) params.set('q', state.search);
-    const { messages } = await api(`/api/messages?${params}`);
+    const { messages, errors } = await api(`/api/messages?${params}`);
+
+    // A mailbox that failed comes back as an error entry rather than an HTTP error,
+    // so that one broken account cannot blank the others. Without surfacing it the
+    // page just says "Nothing in your inbox", which reads as "no mail" when it
+    // actually means "this account needs reconnecting".
+    state.accountErrors = errors || [];
 
     const fresh = messages.filter((m) => m.timestamp > state.lastSeen && m.unread);
     state.messages = messages;
@@ -275,7 +286,17 @@ async function refresh({ quiet = false } = {}) {
     }
 
     if (fresh.length) notifyNewMail(fresh);
-    hideBanner();
+
+    if (state.accountErrors.length) {
+      const expired = state.accountErrors.some((e) => /invalid_grant/i.test(e.error || ''));
+      banner(
+        expired
+          ? `Reconnect ${state.accountErrors.map((e) => e.account).join(', ')} — Google ended the session. Click ➕ Account and sign in again.`
+          : `Could not load ${state.accountErrors.map((e) => e.account).join(', ')}: ${state.accountErrors[0].error}`,
+      );
+    } else {
+      hideBanner();
+    }
     render();
   } catch (err) {
     banner(err.message);
